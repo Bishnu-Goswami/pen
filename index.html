@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Pen Fight Mobile</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.19.0/matter.min.js"></script>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            background-color: #2c3e50;
+            overflow: hidden;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            touch-action: none; /* Prevents mobile scrolling/zooming */
+        }
+        #game-container {
+            position: relative;
+            width: 100%;
+            height: 100%;
+        }
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+        }
+        #ui-layer {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+        }
+        .panel {
+            background: rgba(255, 255, 255, 0.95);
+            padding: 20px;
+            border-radius: 12px;
+            text-align: center;
+            pointer-events: auto;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+            max-width: 90%;
+        }
+        h1, h2 { margin-top: 0; color: #333; }
+        .pen-option {
+            background: #ecf0f1;
+            border: 2px solid #bdc3c7;
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 8px;
+            font-weight: bold;
+        }
+        .pen-option:active { background: #d5dbdb; }
+        .desc { font-size: 0.85em; color: #555; font-weight: normal; margin-top: 5px; }
+        
+        #hud {
+            position: absolute;
+            top: 20px;
+            width: 100%;
+            text-align: center;
+            font-size: 1.5em;
+            font-weight: bold;
+            color: white;
+            text-shadow: 1px 1px 3px rgba(0,0,0,0.8);
+            pointer-events: none;
+        }
+        #turn-indicator {
+            background: rgba(0, 0, 0, 0.5);
+            padding: 5px 15px;
+            border-radius: 20px;
+            display: inline-block;
+        }
+    </style>
+</head>
+<body>
+
+<div id="game-container">
+    <div id="hud" style="display: none;">
+        <div id="turn-indicator">Player 1's Turn</div>
+    </div>
+    
+    <div id="ui-layer">
+        <div id="menu" class="panel">
+            <h1 id="menu-title">Player 1</h1>
+            <h2>Select Your Pen</h2>
+            
+            <div class="pen-option" onclick="selectPen('classic')">
+                Classic Pen
+                <div class="desc">Standard rectangle. Balanced slide and spin.</div>
+            </div>
+            <div class="pen-option" onclick="selectPen('thick')">
+                Thick Middle
+                <div class="desc">Bulky center. Spins rapidly, resists linear sliding.</div>
+            </div>
+            <div class="pen-option" onclick="selectPen('clip')">
+                The Clipper
+                <div class="desc">Asymmetrical weight due to a side clip. Unpredictable spin.</div>
+            </div>
+        </div>
+        
+        <div id="game-over" class="panel" style="display: none;">
+            <h1 id="winner-text">Player 1 Wins!</h1>
+            <div class="pen-option" onclick="resetGame()">Play Again</div>
+        </div>
+    </div>
+</div>
+
+<script>
+    // Matter.js modules
+    const Engine = Matter.Engine,
+          Render = Matter.Render,
+          Runner = Matter.Runner,
+          Bodies = Matter.Bodies,
+          Body = Matter.Body,
+          Composite = Matter.Composite,
+          Events = Matter.Events,
+          Vector = Matter.Vector;
+
+    let engine, render, runner;
+    let player1PenType = null;
+    let player2PenType = null;
+    let p1Body, p2Body;
+    let currentPlayer = 1;
+    let gameState = 'MENU'; // MENU, AIMING, MOVING, GAMEOVER
+    
+    // Physics tuning
+    const FRICTION = 0.15;
+    const AIR_FRICTION = 0.03; // Acts as desk sliding friction
+    const RESTITUTION = 0.6;   // Bounciness on hit
+    const PEN_DENSITY = 0.005;
+
+    // Bench dimensions
+    const width = window.innerWidth;
+    const height = window.innerHeight;
+    const benchWidth = width * 0.9;
+    const benchHeight = height * 0.8;
+    const benchX = width / 2;
+    const benchY = height / 2;
+
+    // Touch/Swipe variables
+    let touchStartPos = null;
+    let touchCurrentPos = null;
+    let dragBody = null;
+
+    function initEngine() {
+        engine = Engine.create();
+        engine.gravity.y = 0; // Top-down view
+
+        render = Render.create({
+            element: document.getElementById('game-container'),
+            engine: engine,
+            options: {
+                width: width,
+                height: height,
+                wireframes: false,
+                background: '#2c3e50'
+            }
+        });
+
+        // Draw the "Bench" as a static background rectangle (visual only, collisions disabled for pens to fall off)
+        const bench = Bodies.rectangle(benchX, benchY, benchWidth, benchHeight, {
+            isStatic: true,
+            isSensor: true, // Pens don't collide with the bench surface itself
+            render: { fillStyle: '#8e44ad' } // Bench color
+        });
+        Composite.add(engine.world, bench);
+
+        Render.run(render);
+        runner = Runner.create();
+        Runner.run(runner, engine);
+
+        setupTouchEvents();
+        setupGameLoop();
+    }
+
+    function createPen(type, x, y, color) {
+        let parts = [];
+        const baseOptions = {
+            friction: FRICTION,
+            frictionAir: AIR_FRICTION,
+            restitution: RESTITUTION,
+            density: PEN_DENSITY,
+            render: { fillStyle: color }
+        };
+
+        if (type === 'classic') {
+            parts.push(Bodies.rectangle(x, y, 20, 120, baseOptions));
+        } 
+        else if (type === 'thick') {
+            // Thick middle (3 pieces combined)
+            parts.push(Bodies.rectangle(x, y - 40, 15, 40, baseOptions)); // Top
+            parts.push(Bodies.rectangle(x, y + 40, 15, 40, baseOptions)); // Bottom
+            parts.push(Bodies.rectangle(x, y, 35, 60, baseOptions));      // Thick middle
+        } 
+        else if (type === 'clip') {
+            // Standard body + side clip
+            parts.push(Bodies.rectangle(x, y, 20, 120, baseOptions));
+            parts.push(Bodies.rectangle(x + 15, y - 30, 10, 40, baseOptions)); // Clip on the right side
+        }
+
+        const pen = Body.create({
+            parts: parts,
+            friction: FRICTION,
+            frictionAir: AIR_FRICTION,
+            restitution: RESTITUTION
+        });
+        
+        return pen;
+    }
+
+    function selectPen(type) {
+        if (!player1PenType) {
+            player1PenType = type;
+            document.getElementById('menu-title').innerText = "Player 2";
+        } else {
+            player2PenType = type;
+            document.getElementById('menu').style.display = 'none';
+            document.getElementById('hud').style.display = 'block';
+            startGame();
+        }
+    }
+
+    function startGame() {
+        // Place pens at opposite ends of the bench
+        p1Body = createPen(player1PenType, benchX, benchY + benchHeight/3, '#e74c3c'); // Red
+        p2Body = createPen(player2PenType, benchX, benchY - benchHeight/3, '#3498db'); // Blue
+
+        Composite.add(engine.world, [p1Body, p2Body]);
+        currentPlayer = 1;
+        gameState = 'AIMING';
+        updateTurnUI();
+    }
+
+    function setupTouchEvents() {
+        const canvas = render.canvas;
+
+        canvas.addEventListener('touchstart', (e) => {
+            if (gameState !== 'AIMING') return;
+            const touch = e.touches[0];
+            touchStartPos = { x: touch.clientX, y: touch.clientY };
+            touchCurrentPos = { ...touchStartPos };
+        });
+
+        canvas.addEventListener('touchmove', (e) => {
+            if (gameState !== 'AIMING' || !touchStartPos) return;
+            const touch = e.touches[0];
+            touchCurrentPos = { x: touch.clientX, y: touch.clientY };
+        });
+
+        canvas.addEventListener('touchend', (e) => {
+            if (gameState !== 'AIMING' || !touchStartPos) return;
+            
+            // Calculate swipe vector (slingshot style: pull back to shoot forward)
+            const forceX = (touchStartPos.x - touchCurrentPos.x) * 0.0003;
+            const forceY = (touchStartPos.y - touchCurrentPos.y) * 0.0003;
+            
+            // Prevent tiny accidental touches
+            if (Math.abs(forceX) > 0.002 || Math.abs(forceY) > 0.002) {
+                const activeBody = (currentPlayer === 1) ? p1Body : p2Body;
+                
+                // Apply force to the center of the active pen
+                Body.applyForce(activeBody, activeBody.position, { x: forceX, y: forceY });
+                
+                // Add a slight random torque based on swipe to simulate off-center flicking
+                const spinForce = (Math.random() - 0.5) * 0.05;
+                Body.setAngularVelocity(activeBody, spinForce);
+
+                gameState = 'MOVING';
+            }
+            touchStartPos = null;
+        });
+    }
+
+    // Custom render loop for the drag line
+    Events.on(render, 'afterRender', function() {
+        if (gameState === 'AIMING' && touchStartPos && touchCurrentPos) {
+            const ctx = render.context;
+            const activeBody = (currentPlayer === 1) ? p1Body : p2Body;
+
+            // Draw Aiming Line (Slingshot)
+            ctx.beginPath();
+            ctx.moveTo(activeBody.position.x, activeBody.position.y);
+            
+            // Calculate where the pen will go
+            const dx = touchStartPos.x - touchCurrentPos.x;
+            const dy = touchStartPos.y - touchCurrentPos.y;
+            
+            ctx.lineTo(activeBody.position.x + dx * 2, activeBody.position.y + dy * 2);
+            ctx.strokeStyle = (currentPlayer === 1) ? '#ffbaba' : '#baddff';
+            ctx.lineWidth = 4;
+            ctx.setLineDash([10, 10]);
+            ctx.stroke();
+            ctx.setLineDash([]);
+        }
+    });
+
+    function setupGameLoop() {
+        Events.on(engine, 'beforeUpdate', function() {
+            if (gameState === 'MENU' || gameState === 'GAMEOVER') return;
+
+            // Check if pens fell off the bench
+            const p1Out = isOutOfBounds(p1Body);
+            const p2Out = isOutOfBounds(p2Body);
+
+            if (p1Out || p2Out) {
+                gameState = 'GAMEOVER';
+                if (p1Out && p2Out) showWinScreen("It's a Draw!");
+                else if (p1Out) showWinScreen("Player 2 Wins!");
+                else if (p2Out) showWinScreen("Player 1 Wins!");
+                return;
+            }
+
+            // Check if bodies have stopped moving
+            if (gameState === 'MOVING') {
+                const p1Stopped = p1Body.speed < 0.1 && Math.abs(p1Body.angularVelocity) < 0.02;
+                const p2Stopped = p2Body.speed < 0.1 && Math.abs(p2Body.angularVelocity) < 0.02;
+
+                if (p1Stopped && p2Stopped) {
+                    // Fully stop them to prevent micro-drifting
+                    Body.setVelocity(p1Body, { x: 0, y: 0 });
+                    Body.setAngularVelocity(p1Body, 0);
+                    Body.setVelocity(p2Body, { x: 0, y: 0 });
+                    Body.setAngularVelocity(p2Body, 0);
+
+                    // Switch turn
+                    currentPlayer = currentPlayer === 1 ? 2 : 1;
+                    gameState = 'AIMING';
+                    updateTurnUI();
+                }
+            }
+        });
+    }
+
+    function isOutOfBounds(body) {
+        // Calculate the boundaries of the bench
+        const left = benchX - benchWidth / 2;
+        const right = benchX + benchWidth / 2;
+        const top = benchY - benchHeight / 2;
+        const bottom = benchY + benchHeight / 2;
+
+        return (body.position.x < left || body.position.x > right || 
+                body.position.y < top || body.position.y > bottom);
+    }
+
+    function updateTurnUI() {
+        const indicator = document.getElementById('turn-indicator');
+        indicator.innerText = `Player ${currentPlayer}'s Turn`;
+        indicator.style.color = currentPlayer === 1 ? '#e74c3c' : '#3498db';
+    }
+
+    function showWinScreen(text) {
+        document.getElementById('hud').style.display = 'none';
+        document.getElementById('winner-text').innerText = text;
+        document.getElementById('game-over').style.display = 'block';
+    }
+
+    function resetGame() {
+        Composite.clear(engine.world);
+        Engine.clear(engine);
+        
+        // Re-add the bench
+        const bench = Bodies.rectangle(benchX, benchY, benchWidth, benchHeight, {
+            isStatic: true,
+            isSensor: true,
+            render: { fillStyle: '#8e44ad' }
+        });
+        Composite.add(engine.world, bench);
+
+        player1PenType = null;
+        player2PenType = null;
+        document.getElementById('menu-title').innerText = "Player 1";
+        document.getElementById('game-over').style.display = 'none';
+        document.getElementById('menu').style.display = 'block';
+        gameState = 'MENU';
+    }
+
+    // Initialize the engine when the window loads
+    window.onload = initEngine;
+
+</script>
+</body>
+</html>
